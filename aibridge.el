@@ -674,6 +674,9 @@ If ABS-ROOT is nil, return every conversation."
   (interactive)
   (catch 'aibridge-org--abort-send
     (let* ((inhibit-read-only t)
+           ;; Remember the buffer where this send originated so async events
+           ;; don’t depend on whichever buffer is focused later.
+           (origin-buf (current-buffer))
            (bol aibridge-org--prompt-bol)
            (eol (line-end-position)))
       ;; Empty line: insert a fresh prompt and abort synchronously.
@@ -703,35 +706,38 @@ If ABS-ROOT is nil, return every conversation."
         (aibridge-org--backend-send
          text nil
          (lambda (ev)
-           ;; Never allow async paths to "return" from aibridge-org-send.
-           (condition-case err
-               (pcase (plist-get ev :type)
-                 ;; Capture Codex session id once on first turn
-                ('session
-                 (let ((cid (plist-get ev :conversation-id)))
-                   (when (and cid (stringp cid))
-                     (aibridge-org--safe-in-target
-                      (lambda ()
-                        (setq aibridge-org--conversation-id cid)
-                        (aibridge-org--register-buffer-for-cid cid)))
-                     (aibridge-org--handle-status-ev
-                      (list :id "session" :text (format "session %s" cid) :done t)))))
+           ;; Route all async UI updates to the originating buffer, if alive.
+           (when (buffer-live-p origin-buf)
+             (with-current-buffer origin-buf
+               ;; Never allow async paths to "return" from aibridge-org-send.
+               (condition-case err
+                   (pcase (plist-get ev :type)
+                   ;; Capture Codex session id once on first turn
+                  ('session
+                   (let ((cid (plist-get ev :conversation-id)))
+                     (when (and cid (stringp cid))
+                       (aibridge-org--safe-in-target
+                        (lambda ()
+                          (setq aibridge-org--conversation-id cid)
+                          (aibridge-org--register-buffer-for-cid cid)))
+                       (aibridge-org--handle-status-ev
+                        (list :id "session" :text (format "session %s" cid) :done t)))))
 
-                 ('status (aibridge-org--handle-status-ev ev))
-                 ('chunk  (setq opened (aibridge-org--handle-chunk-ev ev opened)))
-                 ('done   (aibridge-org--handle-done-ev opened))
-                 (_       (setq opened (aibridge-org--handle-unknown-ev ev opened))))
-             (no-catch
-              ;; Swallow stale `return`/`cl-return` aimed at the send’s block.
-              (when (and (consp err)
-                         (eq (car err) 'no-catch)
-                         ;; Tag from cl-return inside aibridge-org-send
-                         (equal (cadr err) '--cl-block-aibridge-org-send--))
-                ;; silently ignore
-                nil))
-             (error
-              ;; Don’t break the UI on unexpected errors
-              (message "[aibridge] send callback error: %S" err)))))))))
+                  ('status (aibridge-org--handle-status-ev ev))
+                  ('chunk  (setq opened (aibridge-org--handle-chunk-ev ev opened)))
+                  ('done   (aibridge-org--handle-done-ev opened))
+                  (_       (setq opened (aibridge-org--handle-unknown-ev ev opened))))
+               (no-catch
+                ;; Swallow stale `return`/`cl-return` aimed at the send’s block.
+                (when (and (consp err)
+                           (eq (car err) 'no-catch)
+                           ;; Tag from cl-return inside aibridge-org-send
+                           (equal (cadr err) '--cl-block-aibridge-org-send--))
+                  ;; silently ignore
+                  nil))
+               (error
+                ;; Don’t break the UI on unexpected errors
+                (message "[aibridge] send callback error: %S" err)))))))))))
 
 
 (defun aibridge-org-newline ()
