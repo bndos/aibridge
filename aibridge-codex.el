@@ -636,6 +636,19 @@ KIND is a short human string like \"apply patch\" or \"run command\"."
         ;; clean only the rid mapping; keep conversation alias for future turns
         (when rid (remhash rid aibridge-codex--streams-by-rid)))
 
+       ;; turn_diff: server provides a single unified diff for the turn
+       ;; ((string= type "turn_diff")
+       ;;  (let* ((ud (or (alist-get 'unified_diff msg)
+       ;;                 (alist-get 'unifiedDiff msg))))
+       ;;    (when (and (stringp ud) (not (string-empty-p ud)))
+       ;;      (with-current-buffer (get-buffer-create "*Codex Turn Diff*")
+       ;;        (let ((inhibit-read-only t))
+       ;;          (erase-buffer)
+       ;;          (insert ud)
+       ;;          (diff-mode)
+       ;;          (read-only-mode 1)))
+       ;;      (funcall cb (list :type 'status :id "turn-diff" :text "Turn diff available (see *Codex Turn Diff*)" :done t)))))
+
        ;; exec_command_begin
        ((string= type "exec_command_begin")
         (let* ((call-id   (or (alist-get 'call_id msg) rid))
@@ -809,6 +822,7 @@ When CWD is provided, file paths are made relative when possible."
    (lambda (entry)
      (let* ((file (car entry))
             (spec (cdr entry))
+            (add  (aibridge-codex--aget spec 'add :add "add"))
             (upd  (aibridge-codex--aget spec 'update :update "update"))
             (mv   (or (aibridge-codex--aget spec 'move_path :move_path "move_path")
                       (and upd (aibridge-codex--aget upd 'move_path :move_path "move_path"))))
@@ -821,6 +835,18 @@ When CWD is provided, file paths are made relative when possible."
                     (error file)))
             (dst  (or mv rel)))
        (cond
+        (add
+         (let* ((content (aibridge-codex--aget add 'content :content "content"))
+                (text    (if (and (stringp content)
+                                  (not (string-suffix-p "\n" content)))
+                             (concat content "\n")
+                           (or content "")))
+                (lines   (and (stringp text) (split-string text "\n" t)))
+                (n       (length (or lines '())))
+                (hdr     (format "--- /dev/null\n+++ b/%s\n" rel))
+                (hunk-h  (format "@@ -0,0 +1,%d @@\n" (max 0 n)))
+                (plus    (mapconcat (lambda (l) (concat "+" l)) (or lines '()) "\n")))
+           (concat hdr hunk-h plus (when (> n 0) "\n"))))
         (ud
          ;; If server only gives hunks (starting with @@), prepend minimal headers.
          (let ((hdr (format "--- a/%s\n+++ b/%s\n" rel (or dst rel))))
@@ -828,6 +854,7 @@ When CWD is provided, file paths are made relative when possible."
         (mv
          (format "--- a/%s\n+++ b/%s\n@@\n# move/rename only\n" rel dst))
         (t
+         (message "[codex] unknown change entry: %S" entry)
          (format "### Unknown change for %s ###\n" rel)))))
    changes
    "\n"))
