@@ -633,32 +633,62 @@ KIND is a short human string like \"apply patch\" or \"run command\"."
 
        ((string= type "task_complete")
         (funcall cb (list :type 'done))
+        ;; If we were patching files this turn, mark them as completed.
+        (let ((patching (plist-get stream :patching)))
+          (when (and (listp patching) (> (length patching) 0))
+            (dolist (f patching)
+              (funcall cb (list :type 'status
+                                :id   (format "patching:%s" f)
+                                :text (format "patching %s" f)
+                                :done 'success)))
+            (setq stream (plist-put stream :patching nil))
+            (when rid (puthash rid stream aibridge-codex--streams-by-rid))
+            (when cid (puthash cid stream aibridge-codex--streams-by-cid))))
         ;; clean only the rid mapping; keep conversation alias for future turns
         (when rid (remhash rid aibridge-codex--streams-by-rid)))
 
-       ;; turn_diff: server provides a single unified diff for the turn
-       ;; ((string= type "turn_diff")
-       ;;  (let* ((ud (or (alist-get 'unified_diff msg)
-       ;;                 (alist-get 'unifiedDiff msg))))
-       ;;    (when (and (stringp ud) (not (string-empty-p ud)))
-       ;;      (with-current-buffer (get-buffer-create "*Codex Turn Diff*")
-       ;;        (let ((inhibit-read-only t))
-       ;;          (erase-buffer)
-       ;;          (insert ud)
-       ;;          (diff-mode)
-       ;;          (read-only-mode 1)))
-       ;;      (funcall cb (list :type 'status :id "turn-diff" :text "Turn diff available (see *Codex Turn Diff*)" :done t)))))
+       ;; turn_diff: show a compact status only (no hunk preview)
+       ((string= type "turn_diff")
+        (let* ((ud (or (alist-get 'unified_diff msg)
+                       (alist-get 'unifiedDiff msg)))
+               (files (when (and (stringp ud) (not (string-empty-p ud)))
+                        (let (out)
+                          (dolist (ln (split-string ud "\n" t))
+                            (cond
+                             ;; Prefer +++ header
+                             ((string-prefix-p "+++ " ln)
+                              (let* ((raw (string-trim (substring ln 4)))
+                                     (f   (if (or (string-prefix-p "a/" raw)
+                                                  (string-prefix-p "b/" raw))
+                                              (substring raw 2)
+                                            raw)))
+                                (push f out)))
+                             ;; Fallback: diff --git a/X b/Y
+                             ((string-prefix-p "diff --git " ln)
+                              (when (string-match " diff --git a/[^ ]+ b/\([^ ]+\)" (concat " " ln))
+                                (push (match-string 1 (concat " " ln)) out)))))
+                          (nreverse (delete-dups out)))))
+              (if (and files (> (length files) 0))
+                  (progn
+                    (setq stream (plist-put stream :patching files))
+                    (when rid (puthash rid stream aibridge-codex--streams-by-rid))
+                    (when cid (puthash cid stream aibridge-codex--streams-by-cid))
+                    (dolist (f files)
+                      (funcall cb (list :type 'status
+                                        :id   (format "patching:%s" f)
+                                        :text (format "patching %s" f)))))
+                (funcall cb (list :type 'status :id "turn-diff" :text "patching (unknown file)")))) ))
 
        ;; exec_command_begin
        ((string= type "exec_command_begin")
-        (let* ((call-id   (or (alist-get 'call_id msg) rid))
-               (cmd       (aibridge-codex--fmt-cmd (alist-get 'command msg)
-                                                   (alist-get 'args msg)))
-               (cwd       (alist-get 'cwd msg))
-               (status-id aibridge-codex--exec-status-id) ;; <— constant ID
-               (cwd-text  (if (and cwd (not (string-empty-p cwd)))
+       (let* ((call-id   (or (alist-get 'call_id msg) rid))
+              (cmd       (aibridge-codex--fmt-cmd (alist-get 'command msg)
+                                                  (alist-get 'args msg)))
+              (cwd       (alist-get 'cwd msg))
+              (status-id aibridge-codex--exec-status-id) ;; <— constant ID
+              (cwd-text  (if (and cwd (not (string-empty-p cwd)))
                               (format "  (cwd %s)" cwd) ""))
-               (text      (format "▶ %s%s" cmd cwd-text))
+               (text      (format "running %s%s" cmd cwd-text))
                (execs     (plist-get stream :exec)))
           ;; keep cache by call-id for the END event
           (when call-id
@@ -667,28 +697,28 @@ KIND is a short human string like \"apply patch\" or \"run command\"."
             (setq stream (plist-put stream :exec execs))
             (when rid (puthash rid stream aibridge-codex--streams-by-rid))
             (when cid (puthash cid stream aibridge-codex--streams-by-cid)))
-          (funcall cb (list :type 'status :id status-id :text text))))
+          (funcall cb (list :type 'status :id status-id :text text :done nil))))
 
        ;; exec_command_end
        ((string= type "exec_command_end")
-        (let* ((call-id   (or (alist-get 'call_id msg) rid))
-               (exit      (alist-get 'exit_code msg))
-               (cwd       (alist-get 'cwd msg))
-               (execs     (plist-get stream :exec))
-               (cached    (and call-id (cdr (assoc call-id execs))))
-               (cmd       (or cached
-                              (aibridge-codex--fmt-cmd (alist-get 'command msg)
-                                                       (alist-get 'args msg))))
-               ;; drop from cache, but status id stays constant
-               (execs     (and call-id (assoc-delete-all call-id execs)))
-               (_         (setq stream (plist-put stream :exec execs)))
-               (status-id aibridge-codex--exec-status-id) ;; <— constant ID
-               (cwd-text  (if (and cwd (not (string-empty-p cwd)))
+       (let* ((call-id   (or (alist-get 'call_id msg) rid))
+              (exit      (alist-get 'exit_code msg))
+              (cwd       (alist-get 'cwd msg))
+              (execs     (plist-get stream :exec))
+              (cached    (and call-id (cdr (assoc call-id execs))))
+              (cmd       (or cached
+                             (aibridge-codex--fmt-cmd (alist-get 'command msg)
+                                                      (alist-get 'args msg))))
+              ;; drop from cache, but status id stays constant
+              (execs     (and call-id (assoc-delete-all call-id execs)))
+              (_         (setq stream (plist-put stream :exec execs)))
+              (status-id aibridge-codex--exec-status-id) ;; <— constant ID
+              (cwd-text  (if (and cwd (not (string-empty-p cwd)))
                               (format "  (cwd %s)" cwd) ""))
-               ;; include exit code so the single line “flips” from ▶ to ✓/✗
-               (prefix    (if (and exit (zerop exit)) "✓" "✗"))
-               (text      (format "%s %s%s (exit %s)" prefix cmd cwd-text (or exit "?"))))
-          (funcall cb (list :type 'status :id status-id :text text))))
+               (okp       (and (numberp exit) (zerop exit)))
+               (text      (format "%s%s (exit %s)" cmd cwd-text (or exit "?")))
+               (doneflag  (if okp 'success 'fail)))
+          (funcall cb (list :type 'status :id status-id :text text :done doneflag))))
 
 
        ((string= type "apply_patch_approval_request")

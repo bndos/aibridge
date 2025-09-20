@@ -440,8 +440,14 @@ If ABS-ROOT is nil, return every conversation."
            (setq aibridge-org--status-anchor (copy-marker start-pos t))))
        ;; Make start/end visible in the whole block
        (let (start end)
-         (let* ((line (concat (if donep "✓ " "• ") (or text "") "\n"))
-                (face (if donep 'aibridge-org-status-done 'aibridge-org-status-face))
+         (let* ((prefix (cond
+                         ((eq donep 'fail) "- [-] ")
+                         ((or (eq donep 'success) donep) "- [x] ")
+                         (t "- [ ] ")))
+                (line (concat prefix (or text "") "\n"))
+                (face (if (or (eq donep 'success) donep)
+                          'aibridge-org-status-done
+                        'aibridge-org-status-face))
                 (existing (and id (gethash id aibridge-org--status-overlays))))
            (if (and (overlayp existing)
                     (overlay-buffer existing)
