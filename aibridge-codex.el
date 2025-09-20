@@ -565,6 +565,20 @@ Include CWD and REASON as comments."
                        "")))
     (mapconcat #'identity (delq nil lines) "\n")))
 
+(defun aibridge-codex--normalize-reasoning (text)
+  "Flatten whitespace in reasoning TEXT for compact previews."
+  (let ((str (cond
+              ((stringp text) text)
+              ((null text) "")
+              (t (format "%s" text)))))
+    (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " str))))
+
+(defun aibridge-codex--reasoning-preview (text &optional limit)
+  "Return a truncated preview for reasoning TEXT." 
+  (let* ((limit (or limit 200))
+         (flat (aibridge-codex--normalize-reasoning text)))
+    (truncate-string-to-width flat limit nil nil "…")))
+
 (defun aibridge-codex--prompt-and-reply (call-id kind)
   "Ask y/n for CALL-ID and send the decision via the stored :reply fn.
 KIND is a short human string like \"apply patch\" or \"run command\"."
@@ -686,11 +700,37 @@ KIND is a short human string like \"apply patch\" or \"run command\"."
             (string= type "exec_command_output"))
         nil)
 
-       ;; quiet reasoning noise (uncomment to surface)
-       ((or (string= type "agent_reasoning_delta")
-            (string= type "agent_reasoning")
-            (string= type "agent_reasoning_section_break"))
-        nil)
+       ;; live reasoning previews
+       ((string= type "agent_reasoning_delta")
+        (let ((delta (alist-get 'delta msg)))
+          (when (and delta (not (string-empty-p delta)))
+            (let* ((prev (or (plist-get stream :reasoning-text) ""))
+                   (combined (concat prev delta))
+                   (preview (aibridge-codex--reasoning-preview combined)))
+              (setq stream (plist-put stream :reasoning-text combined))
+              (when rid (puthash rid stream aibridge-codex--streams-by-rid))
+              (when cid (puthash cid stream aibridge-codex--streams-by-cid))
+              (funcall cb (list :type 'reasoning :text preview))))))
+
+       ((string= type "agent_reasoning")
+        (let* ((final (or (aibridge-codex--aget msg 'text :text "text")
+                          (aibridge-codex--aget msg 'content :content "content")
+                          ""))
+               (prev  (or (plist-get stream :reasoning-text) ""))
+               (combined (if (string-empty-p final) prev final))
+               (preview (aibridge-codex--reasoning-preview combined)))
+          (setq stream (plist-put stream :reasoning-text nil))
+          (when rid (puthash rid stream aibridge-codex--streams-by-rid))
+          (when cid (puthash cid stream aibridge-codex--streams-by-cid))
+          (funcall cb (list :type 'reasoning :text preview :done t))))
+
+       ((string= type "agent_reasoning_section_break")
+        (let* ((prev (or (plist-get stream :reasoning-text) ""))
+               (preview (aibridge-codex--reasoning-preview prev)))
+          (setq stream (plist-put stream :reasoning-text nil))
+          (when rid (puthash rid stream aibridge-codex--streams-by-rid))
+          (when cid (puthash cid stream aibridge-codex--streams-by-cid))
+          (funcall cb (list :type 'reasoning :text preview :done t)))))
 
        ;; fallback: log to *Messages* (keeps UI clean)
        (t

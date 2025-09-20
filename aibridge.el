@@ -90,6 +90,7 @@ depending on whatever `current-buffer' happens to be when async events arrive."
 (defvar-local aibridge-org--spinner-label "")
 (defvar-local aibridge-org--status-overlays (make-hash-table :test 'equal))
 (defvar-local aibridge-org--status-anchor nil)
+(defvar-local aibridge-org--status-start nil)
 (defvar-local aibridge-org--append-marker nil)
 (defvar-local aibridge-org--target-buffer nil)
 ;; Track and update the displayed title (with model)
@@ -112,6 +113,10 @@ depending on whatever `current-buffer' happens to be when async events arrive."
 (defcustom aibridge-org-approval-policies '("never" "untrusted" "on-request" "on-failure")
   "Approval policies available for selection."
   :type '(repeat string))
+
+(defcustom aibridge-org-reasoning-preview-max 160
+  "Maximum characters to show for live reasoning previews."
+  :type 'integer)
 
 (defun aibridge-org--combine-model-efforts ()
   "Return list of display strings like gpt-5-medium, gpt-5-codex-high."
@@ -557,36 +562,53 @@ If ABS-ROOT is nil, return every conversation."
      (let ((inhibit-read-only t))
        (unless (and (markerp aibridge-org--status-anchor)
                     (marker-buffer aibridge-org--status-anchor))
-         (setq aibridge-org--status-anchor
-               (copy-marker
-                (save-excursion
-                  (goto-char aibridge-org--prompt-bol)
-                  (line-beginning-position))
-                nil)))
-       (goto-char aibridge-org--status-anchor)
-       (if (and id (gethash id aibridge-org--status-overlays))
-           (let* ((ov  (gethash id aibridge-org--status-overlays))
-                  (beg (and (overlayp ov) (overlay-start ov)))
-                  (end (and (overlayp ov) (overlay-end ov))))
-             (if (and beg end)
-                 (save-excursion
-                   (goto-char beg)
-                   (delete-region beg end)
-                   (let ((s (concat (if donep "✓ " "• ") text "\n")))
-                     (insert (propertize s 'face (if donep 'aibridge-org-status-done
-                                                   'aibridge-org-status-face)))
-                     (move-overlay ov beg (+ beg (length s)))))
-               (remhash id aibridge-org--status-overlays)
-               (aibridge-org--status text id donep)))
-         (let ((start (point)))
-           (insert (propertize (concat (if donep "✓ " "• ") text "\n")
-                               'face (if donep 'aibridge-org-status-done
-                                       'aibridge-org-status-face)))
-           (when id (puthash id (make-overlay start (point))
-                             aibridge-org--status-overlays))))
-       (save-excursion
-         (end-of-line 0)
-         (aibridge-org--region-ro (line-beginning-position) (line-end-position)))))))
+         (let* ((fallback (if (and (markerp aibridge-org--append-marker)
+                                   (marker-buffer aibridge-org--append-marker))
+                              (marker-position aibridge-org--append-marker)
+                            (point)))
+                (start-pos (if (and (markerp aibridge-org--status-start)
+                                    (marker-buffer aibridge-org--status-start))
+                               (marker-position aibridge-org--status-start)
+                             fallback)))
+           (setq aibridge-org--status-start (copy-marker start-pos nil))
+           (setq aibridge-org--status-anchor (copy-marker start-pos t))))
+       (let* ((line (concat (if donep "✓ " "• ") (or text "") "\n"))
+              (face (if donep 'aibridge-org-status-done 'aibridge-org-status-face))
+              (existing (and id (gethash id aibridge-org--status-overlays)))
+              start end)
+         (if (and (overlayp existing)
+                  (overlay-buffer existing)
+                  (overlay-start existing)
+                  (overlay-end existing))
+             (progn
+               (setq start (overlay-start existing))
+               (setq end   (overlay-end existing))
+               (goto-char start)
+               (delete-region start end)
+               (setq start (point))
+               (insert (propertize line 'face face))
+               (setq end (point))
+               (move-overlay existing start end))
+           (goto-char (marker-position aibridge-org--status-anchor))
+           (setq start (point))
+           (insert (propertize line 'face face))
+           (setq end (point))
+           (when id
+             (puthash id (make-overlay start end)
+                      aibridge-org--status-overlays))))
+       (when (and start end)
+         (aibridge-org--region-ro start end)
+         (let* ((anchor-pos (if (and (markerp aibridge-org--status-anchor)
+                                     (marker-buffer aibridge-org--status-anchor))
+                                (marker-position aibridge-org--status-anchor)
+                              start))
+                (new-anchor (if anchor-pos (max anchor-pos end) end)))
+           (set-marker aibridge-org--status-anchor new-anchor))
+         (when (and (markerp aibridge-org--append-marker)
+                    (marker-buffer aibridge-org--append-marker))
+           (let ((append-pos (marker-position aibridge-org--append-marker)))
+             (set-marker aibridge-org--append-marker
+                         (if append-pos (max append-pos end) end)))))))))
 
 (defun aibridge-org--collect-mentions (text)
   (let (files)
@@ -650,6 +672,20 @@ If ABS-ROOT is nil, return every conversation."
                         (plist-get ev :id)
                         (plist-get ev :done)))
 
+(defun aibridge-org--handle-reasoning-ev (ev)
+  "Render a :reasoning event EV as a live preview line."
+  (let* ((raw (or (plist-get ev :text) ""))
+         (done (plist-get ev :done))
+         (flat (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " raw)))
+         (preview (truncate-string-to-width flat aibridge-org-reasoning-preview-max nil nil "…"))
+         (body (if (string-empty-p preview) "…" preview))
+         (line (if done
+                   (if (string-empty-p flat)
+                       "Reasoning complete"
+                     (format "Reasoning complete: %s" body))
+                 (format "Reasoning: %s" body))))
+    (aibridge-org--status line "reasoning" done)))
+
 (defun aibridge-org--handle-chunk-ev (ev opened)
   "Render a :chunk event EV. Opens src if OPENED is nil. Returns new OPENED."
   (aibridge-org--safe-in-target
@@ -704,6 +740,7 @@ If ABS-ROOT is nil, return every conversation."
       (aibridge-org--region-ro (max (point-min) (1- bol)) (point))
 
       ;; Reset per-turn UI anchors
+      (setq aibridge-org--status-start (copy-marker (point) nil))
       (setq aibridge-org--status-anchor (copy-marker (point) t))
       (set-marker aibridge-org--append-marker (point))
       (clrhash aibridge-org--status-overlays)
@@ -733,8 +770,9 @@ If ABS-ROOT is nil, return every conversation."
                           (aibridge-org--handle-status-ev
                            (list :id "session" :text (format "session %s" cid) :done t)))))
 
-                     ('status (aibridge-org--handle-status-ev ev))
-                     ('chunk  (setq opened (aibridge-org--handle-chunk-ev ev opened)))
+                  ('status (aibridge-org--handle-status-ev ev))
+                  ('reasoning (aibridge-org--handle-reasoning-ev ev))
+                  ('chunk  (setq opened (aibridge-org--handle-chunk-ev ev opened)))
                      ('done   (aibridge-org--handle-done-ev opened))
                      (_       (setq opened (aibridge-org--handle-unknown-ev ev opened))))
                  (no-catch
@@ -840,6 +878,7 @@ in `aibridge-org`)."
   (setq aibridge-org--spinner-label "")
   (setq aibridge-org--status-overlays (make-hash-table :test 'equal))
   (setq aibridge-org--status-anchor nil)
+  (setq aibridge-org--status-start nil)
   (setq-local default-directory
               (or (when-let ((pr (project-current))) (project-root pr))
                   default-directory))
