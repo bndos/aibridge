@@ -22,6 +22,9 @@
 
 (defvar aibridge-codex--client nil)
 (defvar aibridge-codex--pending-approvals (make-hash-table :test 'equal))
+(defvar aibridge-org--registered-cid nil)
+(defvar aibridge-org--conversation-id nil)
+(defvar aibridge-org-mode nil)
 
 ;; Active streams keyed by requestId (and optionally by session/conversation id)
 (defvar aibridge-codex--streams-by-rid (make-hash-table :test 'equal))
@@ -122,9 +125,26 @@ Treat 'already attached' errors as success. No local cache."
     (error "Codex: expected per-buffer client, got %S" client))
   client)
 
+(defun aibridge-codex--buffer-conversation-id (buf)
+  "Return the conversation id associated with BUF, if any."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (cond
+       ((and (boundp 'aibridge-org--registered-cid)
+             (stringp aibridge-org--registered-cid)
+             (not (string-empty-p aibridge-org--registered-cid)))
+        aibridge-org--registered-cid)
+       ((and (boundp 'aibridge-org--conversation-id)
+             (stringp aibridge-org--conversation-id)
+             (not (string-empty-p aibridge-org--conversation-id)))
+        aibridge-org--conversation-id)
+       (t nil)))))
+
 (defun aibridge-codex--anchor-buffer-p (buf)
   (and (buffer-live-p buf)
-       (string-match-p aibridge-codex-anchor-buffer-regexp (buffer-name buf))))
+       (or (string-match-p aibridge-codex-anchor-buffer-regexp (buffer-name buf))
+           (with-current-buffer buf (derived-mode-p 'aibridge-org-mode))
+           (aibridge-codex--buffer-conversation-id buf))))
 
 (defun aibridge-codex--note-anchor! ()
   "If current buffer is an anchor, remember it."
@@ -146,28 +166,34 @@ Treat 'already attached' errors as success. No local cache."
 (add-hook 'window-selection-change-functions
           (lambda (_frame) (aibridge-codex--global-anchor-tick)))
 
-(defun aibridge-codex--pending-unshown-bufs ()
-  "Return a list of approval buffers that exist but aren’t visible."
+(defun aibridge-codex--pending-unshown-bufs (&optional conversation-id)
+  "Return approval buffers that exist but aren’t visible.
+When CONVERSATION-ID is provided, restrict to entries for that id."
   (let (out)
     (maphash
      (lambda (_call-id entry)
-       (let ((b (plist-get entry :buf)))
+       (let ((b (plist-get entry :buf))
+             (cid (plist-get entry :conversation-id)))
          (when (and (buffer-live-p b)
                     (not (get-buffer-window b t)))
-           (push b out))))
+           (when (or (not conversation-id)
+                     (not cid)
+                     (string= cid conversation-id))
+             (push b out)))))
      aibridge-codex--pending-approvals)
     (nreverse out)))
 
 (defun aibridge-codex--pop-approvals-here ()
   "If we’re in an anchor buffer, pop any pending approval buffers in this frame."
   (when (aibridge-codex--anchor-buffer-p (current-buffer))
-    (dolist (b (aibridge-codex--pending-unshown-bufs))
-      ;; polite: reuse a window in this frame; don’t switch frames
-      (let ((display-buffer-overriding-action
-             '((display-buffer-reuse-window display-buffer-pop-up-window)
-               (inhibit-same-window . t)
-               (inhibit-switch-frame . t))))
-        (display-buffer b)))))
+    (let ((cid (aibridge-codex--buffer-conversation-id (current-buffer))))
+      (dolist (b (aibridge-codex--pending-unshown-bufs cid))
+        ;; polite: reuse a window in this frame; don’t switch frames
+        (let ((display-buffer-overriding-action
+               '((display-buffer-reuse-window display-buffer-pop-up-window)
+                 (inhibit-same-window . t)
+                 (inhibit-switch-frame . t))))
+          (display-buffer b))))))
 
 (define-minor-mode aibridge-codex-anchor-follow-mode
   "When enabled in your AI Bridge buffer, auto-pop Codex approvals here only."
@@ -694,6 +720,10 @@ KIND is a short human string like \"apply patch\" or \"run command\"."
       (setq entry (plist-put entry :cwd cwd))
       (setq entry (plist-put entry :reason reason))
       (setq entry (plist-put entry :call-id call-id))
+      (setq entry (plist-put entry :conversation-id
+                             (aibridge-codex--stringify
+                              (aibridge-codex--aget params 'conversationId 'conversation_id
+                                                    :conversationId :conversation_id "conversationId" "conversation_id"))))
       (setq entry (plist-put entry :kind 'exec-command))
       (puthash call-id entry aibridge-codex--pending-approvals))))
 
@@ -715,6 +745,10 @@ KIND is a short human string like \"apply patch\" or \"run command\"."
       (setq entry (plist-put entry :cwd cwd))
       (setq entry (plist-put entry :reason reason))
       (setq entry (plist-put entry :call-id call-id))
+      (setq entry (plist-put entry :conversation-id
+                             (aibridge-codex--stringify
+                              (aibridge-codex--aget params 'conversationId 'conversation_id
+                                                    :conversationId :conversation_id "conversationId" "conversation_id"))))
       (setq entry (plist-put entry :kind 'apply-patch))
       (puthash call-id entry aibridge-codex--pending-approvals))))
 
