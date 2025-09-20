@@ -730,9 +730,7 @@ KIND is a short human string like \"apply patch\" or \"run command\"."
           (setq stream (plist-put stream :reasoning-text nil))
           (when rid (puthash rid stream aibridge-codex--streams-by-rid))
           (when cid (puthash cid stream aibridge-codex--streams-by-cid))
-          (funcall cb (list :type 'reasoning :text preview :done t)))))
-
-       ;; fallback: log to *Messages* (keeps UI clean)
+          (funcall cb (list :type 'reasoning :text preview :done t))))
        (t
         (message "[codex] unhandled event type: %s | params=%S" type params))))))
 
@@ -813,14 +811,14 @@ When CWD is provided, file paths are made relative when possible."
             (spec (cdr entry))
             (upd  (aibridge-codex--aget spec 'update :update "update"))
             (mv   (or (aibridge-codex--aget spec 'move_path :move_path "move_path")
-                     (and upd (aibridge-codex--aget upd 'move_path :move_path "move_path"))))
+                      (and upd (aibridge-codex--aget upd 'move_path :move_path "move_path"))))
             (ud   (or (and upd (aibridge-codex--aget upd 'unified_diff :unified_diff "unified_diff"))
-                     (aibridge-codex--aget spec 'unified_diff :unified_diff "unified_diff")))
+                      (aibridge-codex--aget spec 'unified_diff :unified_diff "unified_diff")))
             (rel  (condition-case _
                       (if (and (stringp cwd) (stringp file) (file-name-absolute-p file))
                           (file-relative-name file cwd)
                         file)
-                   (error file)))
+                    (error file)))
             (dst  (or mv rel)))
        (cond
         (ud
@@ -944,16 +942,16 @@ We open an approval buffer and save REPLY to be triggered by C-c C-c / C-c C-k."
          (call-id (or (aibridge-codex--aget params 'codex_call_id :codex_call_id "codex_call_id") "unknown")))
     (pcase kind
       ("patch-approval"
-        (let* ((changes (aibridge-codex--normalize-change-table
-                          (aibridge-codex--aget params 'codex_changes :codex_changes "codex_changes")))
-                (cwd     (or (aibridge-codex--aget params 'codex_grant_root :codex_grant_root "codex_grant_root")
-                             (aibridge-codex--aget params 'codex_cwd :codex_cwd "codex_cwd"))))
+       (let* ((changes (aibridge-codex--normalize-change-table
+                        (aibridge-codex--aget params 'codex_changes :codex_changes "codex_changes")))
+              (cwd     (or (aibridge-codex--aget params 'codex_grant_root :codex_grant_root "codex_grant_root")
+                           (aibridge-codex--aget params 'codex_cwd :codex_cwd "codex_cwd"))))
          ;; show diff buffer with minor-mode that binds C-c C-c / C-c C-k
          (aibridge-codex--show-approval-diff call-id changes cwd)
          ;; stash reply so keybindings can answer
          (let* ((entry (or (gethash call-id aibridge-codex--pending-approvals) (list))))
-            (setq entry (plist-put entry :reply (aibridge-codex--wrap-reply-normalize reply)))
-            (setq entry (plist-put entry :changes changes))
+           (setq entry (plist-put entry :reply (aibridge-codex--wrap-reply-normalize reply)))
+           (setq entry (plist-put entry :changes changes))
            (setq entry (plist-put entry :cwd cwd))
            (setq entry (plist-put entry :call-id call-id))
            (setq entry (plist-put entry :kind 'apply-patch))
