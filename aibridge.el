@@ -428,16 +428,13 @@ If ABS-ROOT is nil, return every conversation."
      (let ((inhibit-read-only t))
        (unless (and (markerp aibridge-org--status-anchor)
                     (marker-buffer aibridge-org--status-anchor))
-         (let* ((fallback (if (and (markerp aibridge-org--append-marker)
-                                   (marker-buffer aibridge-org--append-marker))
-                              (marker-position aibridge-org--append-marker)
-                            (point)))
+         (let* ((fallback (aibridge-org--status-fallback-position))
                 (start-pos (if (and (markerp aibridge-org--status-start)
                                     (marker-buffer aibridge-org--status-start))
                                (marker-position aibridge-org--status-start)
                              fallback)))
-           (setq aibridge-org--status-start  (copy-marker start-pos nil))
-           (setq aibridge-org--status-anchor (copy-marker start-pos t))))
+          (setq aibridge-org--status-start  (copy-marker start-pos nil))
+          (setq aibridge-org--status-anchor (copy-marker start-pos t))))
        ;; Make start/end visible in the whole block
        (let (start end)
          (let* ((prefix (cond
@@ -476,12 +473,34 @@ If ABS-ROOT is nil, return every conversation."
                                   (marker-position aibridge-org--status-anchor)
                                 start))
                   (new-anchor (if anchor-pos (max anchor-pos end) end)))
-             (set-marker aibridge-org--status-anchor new-anchor))
-           (when (and (markerp aibridge-org--append-marker)
-                      (marker-buffer aibridge-org--append-marker))
-             (let ((append-pos (marker-position aibridge-org--append-marker)))
-               (set-marker aibridge-org--append-marker
-                           (if append-pos (max append-pos end) end))))))))))
+             (set-marker aibridge-org--status-anchor new-anchor))))))))
+
+;; Status placement helpers
+(defun aibridge-org--status-fallback-position ()
+  "Choose a safe fallback position for status insertion.
+Prefers just before any open src block instead of inside it."
+  (let ((pos (cond
+              ((and (markerp aibridge-org--append-marker)
+                    (marker-buffer aibridge-org--append-marker))
+               (marker-position aibridge-org--append-marker))
+              (t (point)))))
+    (or (aibridge-org--pos-before-open-src pos)
+        pos)))
+
+(defun aibridge-org--pos-before-open-src (pos)
+  "If POS is inside an open #+begin_src block, return the beginning of that block line.
+Otherwise return nil."
+  (save-excursion
+    (goto-char pos)
+    (let (begin end)
+      (save-excursion
+        (when (re-search-backward "^#\\+begin_src\\b" nil t)
+          (setq begin (line-beginning-position))))
+      (save-excursion
+        (when (re-search-backward "^#\\+end_src\\b" nil t)
+          (setq end (line-beginning-position))))
+      (when (and begin (or (null end) (> begin end)))
+        begin))))
 
 (defun aibridge-org--collect-mentions (text)
   (let (files)
