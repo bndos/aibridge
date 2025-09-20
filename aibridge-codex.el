@@ -3,6 +3,7 @@
 (require 'aibridge-mcp)
 (require 'cl-lib)
 (require 'subr-x)
+(require 'seq)
 
 (defgroup aibridge-codex nil
   "Codex MCP client."
@@ -322,26 +323,40 @@ On success, also ensure a listener is attached for CID."
       (_ nil))
     res))
 
-(defun aibridge-codex-run* (client prompt opts cb)
-  (let* ((args (append `(("prompt" . ,prompt))
-                       (seq-filter #'identity
-                                   (list
-                                    (when-let ((v (alist-get 'model opts)))                 `("model" . ,v))
-                                    (when-let ((v (alist-get 'profile opts)))               `("profile" . ,v))
-                                    (when-let ((v (alist-get 'cwd opts)))                   `("cwd" . ,v))
-                                    (when-let ((v (alist-get 'sandbox opts)))               `("sandbox" . ,v))
-                                    (when-let ((v (alist-get 'approval-policy opts)))       `("approval-policy" . ,v))
-                                    (when-let ((v (alist-get 'include-plan-tool opts)))     `("include-plan-tool" . ,v))
-                                    (when-let ((v (alist-get 'base-instructions opts)))     `("base-instructions" . ,v))
-                                    (when-let ((v (alist-get 'config opts)))                `("config" . ,v))))))
-         ;; Ensure we pass effort as a first-turn option as well
-         (args (append args (when-let ((v (alist-get 'effort opts)))
-                              (list (cons "effort" v)))))
-         (rid (aibridge-mcp-request (aibridge-codex-client-mcp client) "tools/call"
-                                    `(("name" . "codex") ("arguments" . ,args))
-                                    (lambda (_res) (ignore)))))
-    (puthash rid (list :cb cb :cid nil) aibridge-codex--streams-by-rid)
-    rid))
+(defun aibridge-codex-new-conversation* (client opts)
+  "Start a fresh Codex conversation using OPTS.
+Returns `(:ok OBJ)` with the created conversation descriptor or
+`(:error ERR)` if the request failed."
+  (setq client (aibridge-codex--ensure-client client))
+  (let* ((opts (or opts '()))
+         (model (alist-get 'model opts nil nil #'eq))
+         (profile (alist-get 'profile opts nil nil #'eq))
+         (cwd (alist-get 'cwd opts nil nil #'eq))
+         (approval (alist-get 'approval-policy opts nil nil #'eq))
+         (sandbox (alist-get 'sandbox opts nil nil #'eq))
+         (config (alist-get 'config opts nil nil #'eq))
+         (base (alist-get 'base-instructions opts nil nil #'eq))
+         (plan (alist-get 'include-plan-tool opts nil nil #'eq))
+         (apply (alist-get 'include-apply-patch-tool opts nil nil #'eq))
+         (params (seq-filter
+                  #'identity
+                  (list
+                   (when model                           (cons "model" model))
+                   (when profile                         (cons "profile" profile))
+                   (when cwd                             (cons "cwd" cwd))
+                   (when approval                        (cons "approvalPolicy" approval))
+                   (when sandbox                         (cons "sandbox" sandbox))
+                   (when config                          (cons "config" config))
+                   (when base                            (cons "baseInstructions" base))
+                   (when (not (eq plan nil))             (cons "includePlanTool" plan))
+                   (when (not (eq apply nil))            (cons "includeApplyPatchTool" apply))))))
+    (let ((res (aibridge-codex--sync-request* client "newConversation" params 20.0)))
+      (pcase res
+        (`(:ok ,obj)
+         (when-let ((cid (aibridge-codex--aget obj 'conversationId 'id 'conversation_id)))
+           (aibridge-codex--ensure-listener* client cid)))
+        (_ nil))
+      res)))
 
 (defun aibridge-codex--opt (opts &rest keys)
   (catch 'found

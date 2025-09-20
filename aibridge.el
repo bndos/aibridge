@@ -53,18 +53,28 @@
     (and entry (buffer-live-p (plist-get entry :buffer))
          (plist-get entry :buffer))))
 
-(defun aibridge-org--register-buffer-for-cid (cid)
-  "Register current buffer as the owner of CID and rename it appropriately."
+(defun aibridge-org--register-buffer-for-cid (cid &optional target)
+  "Register TARGET buffer (or current buffer) as owner of CID and rename it.
+
+TARGET can be a buffer object or a buffer name string. Falls back to
+`aibridge-org--target-buffer' or `current-buffer' when nil. This avoids
+depending on whatever `current-buffer' happens to be when async events arrive."
   (when (and (stringp cid) (not (string-empty-p cid)))
-    (let* ((buf (current-buffer))
+    (let* ((buf (cond
+                 ((bufferp target) target)
+                 ((stringp target) (get-buffer target))
+                 (aibridge-org--target-buffer aibridge-org--target-buffer)
+                 (t (current-buffer))))
            (name (aibridge-org--conversation-buffer-name cid)))
-      (unless (string= (buffer-name buf) name)
-        (rename-buffer name t))
-      (puthash cid (list :buffer buf :client aibridge-org--client)
-               aibridge-org--buffers-by-conversation)
-      (setq aibridge-org--registered-cid cid)
-      (setq aibridge-org--target-buffer buf)
-      buf)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (unless (string= (buffer-name buf) name)
+            (rename-buffer name t))
+          (puthash cid (list :buffer buf :client aibridge-org--client)
+                   aibridge-org--buffers-by-conversation)
+          (setq aibridge-org--registered-cid cid)
+          (setq aibridge-org--target-buffer buf)
+          buf)))))
 
 (defun aibridge-org--unregister-buffer-for-cid (cid buf)
   "Remove BUF's association with CID, if it matches the registry entry."
@@ -146,20 +156,20 @@
            (inhibit-read-only t)
            (cur   (buffer-substring-no-properties beg end))
            (model (aibridge-org--current-model-display))
-            (strip-re (rx (group (*? any))
+           (strip-re (rx (group (*? any))
                          (1+ (seq (+ space) "[" (*? (not ?])) "]"))
-                         (* space) eol))
-           (base (or (overlay-get aibridge-org--title-overlay 'aibridge-base)
-                     (if (string-match strip-re cur) (match-string 1 cur) cur)))
-           (sep (if (and (stringp model) (string-prefix-p "\n" model)) "" "  "))
-           (new  (format "%s%s%s" base sep model)))
-      (overlay-put aibridge-org--title-overlay 'aibridge-base base)
-      (unless (string= cur new)             ; avoid doubling if already correct
-        (save-excursion
-          (goto-char beg)
-          (delete-region beg end)
-          (insert (propertize new 'face 'mode-line))
-          (move-overlay aibridge-org--title-overlay beg (+ beg (length new))))))))
+                     (* space) eol))
+      (base (or (overlay-get aibridge-org--title-overlay 'aibridge-base)
+                (if (string-match strip-re cur) (match-string 1 cur) cur)))
+      (sep (if (and (stringp model) (string-prefix-p "\n" model)) "" "  "))
+      (new  (format "%s%s%s" base sep model)))
+    (overlay-put aibridge-org--title-overlay 'aibridge-base base)
+    (unless (string= cur new)             ; avoid doubling if already correct
+      (save-excursion
+        (goto-char beg)
+        (delete-region beg end)
+        (insert (propertize new 'face 'mode-line))
+        (move-overlay aibridge-org--title-overlay beg (+ beg (length new))))))))
 
 (defun aibridge-org-change-model ()
   "Change the model/effort for this conversation via a completing-read."
@@ -230,9 +240,9 @@
     (when-let* ((rollout (aibridge-codex--normalize-rollout-path
                           aibridge-org--rollout-path)))
       (ignore-errors
-         (aibridge-codex--sync-request*
-          aibridge-org--client "archiveConversation"
-          `(("path" . ,rollout)) 1.5))))
+        (aibridge-codex--sync-request*
+         aibridge-org--client "archiveConversation"
+         `(("path" . ,rollout)) 1.5))))
   (aibridge-org--unregister-buffer-for-cid aibridge-org--registered-cid (current-buffer))
   (setq aibridge-org--registered-cid nil)
   (aibridge-codex-stop-client aibridge-org--client)
@@ -712,32 +722,32 @@ If ABS-ROOT is nil, return every conversation."
                ;; Never allow async paths to "return" from aibridge-org-send.
                (condition-case err
                    (pcase (plist-get ev :type)
-                   ;; Capture Codex session id once on first turn
-                  ('session
-                   (let ((cid (plist-get ev :conversation-id)))
-                     (when (and cid (stringp cid))
-                       (aibridge-org--safe-in-target
-                        (lambda ()
-                          (setq aibridge-org--conversation-id cid)
-                          (aibridge-org--register-buffer-for-cid cid)))
-                       (aibridge-org--handle-status-ev
-                        (list :id "session" :text (format "session %s" cid) :done t)))))
+                     ;; Capture Codex session id once on first turn
+                     ('session
+                      (let ((cid (plist-get ev :conversation-id)))
+                        (when (and cid (stringp cid))
+                          (aibridge-org--safe-in-target
+                           (lambda ()
+                             (setq aibridge-org--conversation-id cid)
+                             (aibridge-org--register-buffer-for-cid cid (current-buffer))))
+                          (aibridge-org--handle-status-ev
+                           (list :id "session" :text (format "session %s" cid) :done t)))))
 
-                  ('status (aibridge-org--handle-status-ev ev))
-                  ('chunk  (setq opened (aibridge-org--handle-chunk-ev ev opened)))
-                  ('done   (aibridge-org--handle-done-ev opened))
-                  (_       (setq opened (aibridge-org--handle-unknown-ev ev opened))))
-               (no-catch
-                ;; Swallow stale `return`/`cl-return` aimed at the send’s block.
-                (when (and (consp err)
-                           (eq (car err) 'no-catch)
-                           ;; Tag from cl-return inside aibridge-org-send
-                           (equal (cadr err) '--cl-block-aibridge-org-send--))
-                  ;; silently ignore
-                  nil))
-               (error
-                ;; Don’t break the UI on unexpected errors
-                (message "[aibridge] send callback error: %S" err)))))))))))
+                     ('status (aibridge-org--handle-status-ev ev))
+                     ('chunk  (setq opened (aibridge-org--handle-chunk-ev ev opened)))
+                     ('done   (aibridge-org--handle-done-ev opened))
+                     (_       (setq opened (aibridge-org--handle-unknown-ev ev opened))))
+                 (no-catch
+                  ;; Swallow stale `return`/`cl-return` aimed at the send’s block.
+                  (when (and (consp err)
+                             (eq (car err) 'no-catch)
+                             ;; Tag from cl-return inside aibridge-org-send
+                             (equal (cadr err) '--cl-block-aibridge-org-send--))
+                    ;; silently ignore
+                    nil))
+                 (error
+                  ;; Don’t break the UI on unexpected errors
+                  (message "[aibridge] send callback error: %S" err)))))))))))
 
 
 (defun aibridge-org-newline ()
@@ -747,40 +757,48 @@ If ABS-ROOT is nil, return every conversation."
 ;; ——— simple backend demo with streaming/status
 (defun aibridge-org--deliver (cb ev) (funcall cb ev))
 
-(defun aibridge-org--ensure-conversation (cb)
-  "Ensure there is an active Codex conversation for this buffer, then call CB with the id."
-  (if (and aibridge-org--conversation-id (stringp aibridge-org--conversation-id))
-      (funcall cb aibridge-org--conversation-id)
-    (aibridge-codex-new-conversation
-     ;; you can pass opts here if you want: '(("model" . "gpt-5"))
-     nil
-     (lambda (res)
-       (pcase res
-         (`(:ok ,obj)
-          (let ((cid  (alist-get 'conversationId obj))
-                (opts (aibridge-org--opts-from-conversation obj)))
-            (aibridge-org--safe-in-target
-             (lambda ()
-               (setq aibridge-org--conversation-id cid)
-               (setq aibridge-org--conversation-opts opts)
-               (setq aibridge-org--rollout-path
-                     (or (aibridge-codex--normalize-rollout-path
-                          (aibridge-org--conversation-rollout-path obj))
-                         (aibridge-org--conversation-rollout-path obj)))
-               (aibridge-org--register-buffer-for-cid cid)))
-            (funcall cb cid)))
-         (`(:error ,err)
-          ;; surface error then finish turn
-          (funcall cb nil)
-          (aibridge-org--handle-status-ev (list :text (format "Codex error: %S" err) :id "error" :done t))))))))
+(defun aibridge-org--ensure-conversation (&optional opts)
+  "Ensure this buffer has an active Codex conversation.
+Returns the conversation id when successful, otherwise nil."
+  (if (and (stringp aibridge-org--conversation-id)
+           (not (string-empty-p aibridge-org--conversation-id)))
+      aibridge-org--conversation-id
+    (let* ((opts (or opts (aibridge-org--current-turn-opts)))
+           (res  (aibridge-codex-new-conversation* aibridge-org--client opts)))
+      (pcase res
+        (`(:ok ,obj)
+         (let* ((cid (aibridge-org--json-get obj 'conversationId))
+                (rollout (aibridge-org--conversation-rollout-path obj))
+                (conv-opts (aibridge-org--opts-from-conversation obj))
+                (merged (aibridge-org--merge-opts conv-opts opts))
+                (normalized (when rollout (aibridge-codex--normalize-rollout-path rollout))))
+           (setq aibridge-org--conversation-id cid)
+           (setq aibridge-org--conversation-opts merged)
+           (setq aibridge-org--rollout-path (or normalized rollout))
+           (aibridge-org--register-buffer-for-cid cid (current-buffer))
+           (aibridge-org--refresh-title)
+           cid))
+        (`(:error ,err)
+         (aibridge-org--status
+          (format "New conversation failed: %s"
+                  (or (alist-get 'message err) err))
+          "conversation")
+         nil)
+        (_ nil)))))
 
 (defun aibridge-org--backend-send (text _files cb)
-  "Send TEXT to Codex (start or continue) and stream events back via CB."
+  "Send TEXT to Codex; requires an existing conversation id.
+Does NOT create conversations. Creation must happen earlier (e.g.,
+in `aibridge-org`)." 
   (funcall cb (list :type 'status :id "started" :text "Contacting Codex..."))
-  (let ((turn-opts (aibridge-org--current-turn-opts)))
-    (if (and aibridge-org--conversation-id (stringp aibridge-org--conversation-id))
-        (aibridge-codex-continue* aibridge-org--client aibridge-org--conversation-id text cb turn-opts)
-      (aibridge-codex-run* aibridge-org--client text turn-opts cb))))
+  (let* ((turn-opts (aibridge-org--current-turn-opts))
+         (cid aibridge-org--conversation-id))
+    (if (and (stringp cid) (not (string-empty-p cid)))
+        (aibridge-codex-continue* aibridge-org--client cid text cb turn-opts)
+      (funcall cb (list :type 'status
+                        :id "conversation"
+                        :text "No active Codex conversation (open or resume first)"))
+      (funcall cb (list :type 'done)))))
 
 (defun aibridge-org--in-target (fn &rest args)
   (aibridge-org--ensure-target)
@@ -883,7 +901,7 @@ Clean up TEMP-BUFFER (and its client) before switching. Returns the reused buffe
                         (aibridge-org--merge-opts merged turn-opts)))
                 (setq aibridge-org--rollout-path
                       (or (aibridge-codex--normalize-rollout-path path) path))
-                (aibridge-org--register-buffer-for-cid cid)
+                (aibridge-org--register-buffer-for-cid cid (current-buffer))
                 (aibridge-org--insert-title (plist-get choice :label))
                 (aibridge-org--insert-prompt))
                (`(:error ,err)
@@ -894,6 +912,9 @@ Clean up TEMP-BUFFER (and its client) before switching. Returns the reused buffe
            (setq aibridge-org--conversation-id nil)
            (setq aibridge-org--conversation-opts nil)
            (setq aibridge-org--rollout-path nil)
+           (setq aibridge-org--registered-cid nil)
+           (let ((turn-opts (aibridge-org--current-turn-opts)))
+             (aibridge-org--ensure-conversation turn-opts))
            (aibridge-org--insert-title (plist-get choice :label))
            (aibridge-org--insert-prompt))
           (_ (message "Unknown conversation choice: %S" choice)))))))
